@@ -463,7 +463,10 @@ impl ClaudeCollector {
 
         // Status is best-effort. Signals we trust:
         //   1. Active descendant CPU → tool is running.
-        //   2. last_user_ts_ms > 0 → trailing transcript line is a real
+        //   2. last_assistant_ts_ms > 0 → assistant sent tool_use, awaiting
+        //      tool result. Many tools are I/O-bound (Read, Edit) with low
+        //      CPU, so we can't rely on CPU alone.
+        //   3. last_user_ts_ms > 0 → trailing transcript line is a real
         //      user prompt with no assistant reply yet, so the model is
         //      generating. tool_result wrappers are skipped at the
         //      parser level so this only fires for actual prompts.
@@ -478,8 +481,9 @@ impl ClaudeCollector {
         let status = {
             let has_active_descendant =
                 process::has_active_descendant(sf.pid, children_map, process_info, 5.0);
+            let tools_pending = cached.last_assistant_ts_ms > 0;
             let model_generating = cached.last_user_ts_ms > 0;
-            if has_active_descendant {
+            if has_active_descendant || tools_pending {
                 SessionStatus::Executing
             } else if model_generating {
                 SessionStatus::Thinking
@@ -1260,8 +1264,15 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
                                     result.total_cache_read += cr;
                                     result.total_cache_create += cc;
                                     // Context = input_tokens + cache_read (excludes cache_creation, #54)
+                                    // Exception: when cache_read = 0 but cache_creation > 0,
+                                    // this is a fresh session creating cache for the first time,
+                                    // so cache_creation represents the actual context size.
                                     let prev_context = result.last_context_tokens;
-                                    result.last_context_tokens = inp + cr;
+                                    result.last_context_tokens = if cr == 0 && cc > 0 {
+                                        inp + cc
+                                    } else {
+                                        inp + cr
+                                    };
                                     if result.last_context_tokens > result.max_context_tokens {
                                         result.max_context_tokens = result.last_context_tokens;
                                     }
@@ -1309,12 +1320,14 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
                                     }
                                 }
                                 // Extract all tool_use entries: timeline + current_task + file access audit
+                                let mut has_tool_use = false;
                                 if let Some(content) = msg.get("content").and_then(|c| c.as_array())
                                 {
                                     for item in content {
                                         if item.get("type").and_then(|t| t.as_str())
                                             == Some("tool_use")
                                         {
+                                            has_tool_use = true;
                                             let tool = item
                                                 .get("name")
                                                 .and_then(|n| n.as_str())
@@ -1355,8 +1368,9 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
                                         }
                                     }
                                 }
-                                // Save timestamp for duration calculation
-                                if entry_ts_ms > 0 {
+                                // Save timestamp for duration calculation — only when
+                                // tool_use is present, so we can detect "tools pending".
+                                if entry_ts_ms > 0 && has_tool_use {
                                     result.last_assistant_ts_ms = entry_ts_ms;
                                 }
                                 // Any assistant turn closes the prior "thinking" window.
