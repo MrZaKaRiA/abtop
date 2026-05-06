@@ -482,9 +482,10 @@ impl ClaudeCollector {
 
         // Status is best-effort. Signals we trust:
         //   1. Active descendant CPU → tool is running.
-        //   2. last_assistant_ts_ms > 0 → assistant sent tool_use, awaiting
-        //      tool result. Many tools are I/O-bound (Read, Edit) with low
-        //      CPU, so we can't rely on CPU alone.
+        //   2. current_task non-empty → latest assistant turn left a
+        //      tool_use unanswered. Catches I/O-bound tools (Read, Edit)
+        //      whose descendants stay under 5% CPU, so the CPU heuristic
+        //      alone would flicker to Waiting while the tool runs.
         //   3. last_user_ts_ms > 0 → trailing transcript line is a real
         //      user prompt with no assistant reply yet, so the model is
         //      generating. tool_result wrappers are skipped at the
@@ -1924,6 +1925,53 @@ mod tests {
         assert!(result.saw_turn);
         assert!(result.last_user_ts_ms > 0);
         assert_eq!(result.last_assistant_ts_ms, 0);
+    }
+
+    #[test]
+    fn test_parse_transcript_text_only_assistant_does_not_set_pending_ts() {
+        // Regression: a terminal text-only assistant turn (final "done"
+        // message with no tool_use) used to leave last_assistant_ts_ms
+        // set to its timestamp, which leaked into pending_since_ms and
+        // made the UI tool-duration bar render a phantom growing
+        // duration after the model had finished. Fix: only record the
+        // assistant timestamp when the turn contains tool_use blocks.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:05Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"all done"}]}}"#,
+            ],
+        );
+
+        let result = parse_transcript(file.path(), 0);
+
+        assert!(result.saw_turn);
+        assert_eq!(
+            result.last_assistant_ts_ms, 0,
+            "text-only assistant turn must not record a pending timestamp",
+        );
+    }
+
+    #[test]
+    fn test_parse_transcript_fresh_session_uses_cache_creation_for_context() {
+        // Regression: on a fresh session's first turn the usage block
+        // reports cache_read=0 and cache_creation>0 (the prompt is being
+        // cached for the first time). Using `inp + cr` would underreport
+        // the context as just the input tokens, hiding the real prompt
+        // size from the gauge. Fall back to `inp + cc` in that case.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:05Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":4,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":12000},"content":[{"type":"text","text":"hello"}]}}"#,
+            ],
+        );
+
+        let result = parse_transcript(file.path(), 0);
+
+        assert_eq!(result.last_context_tokens, 12_004);
     }
 
     #[test]

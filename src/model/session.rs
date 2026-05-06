@@ -53,7 +53,7 @@ pub struct RateLimitInfo {
 pub enum SessionStatus {
     /// Model is generating a response (last_user_ts_ms > 0)
     Thinking,
-    /// Running a tool (descendant CPU active OR last_assistant_ts_ms > 0)
+    /// Running a tool (descendant CPU active OR current_task non-empty)
     Executing,
     /// Idle, waiting for user input or permission prompt
     Waiting,
