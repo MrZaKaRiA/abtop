@@ -1123,6 +1123,7 @@ mod tests {
             pending_since_ms: 0,
             thinking_since_ms: 0,
             file_accesses: vec![],
+            config_root: String::new(),
             git_added: 0,
             git_modified: 0,
         }

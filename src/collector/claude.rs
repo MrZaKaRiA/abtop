@@ -673,6 +673,7 @@ impl ClaudeCollector {
             pending_since_ms: cached.last_assistant_ts_ms,
             thinking_since_ms: cached.last_user_ts_ms,
             file_accesses,
+            config_root: super::abbrev_path(&config.base_dir()),
         })
     }
 
